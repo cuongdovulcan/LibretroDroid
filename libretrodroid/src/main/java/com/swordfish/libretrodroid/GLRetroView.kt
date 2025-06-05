@@ -429,14 +429,11 @@ class GLRetroView(
                 return@catchExceptionsWithResult block()
             }
 
-            val latch = CountDownLatch(1)
             var result: T? = null
             queueEvent {
                 result = block()
-                latch.countDown()
             }
 
-            latch.awaitUninterruptibly()
             result
         }
     }
