@@ -675,6 +675,7 @@ void LibretroDroid::initializeSignalHandlers() {
     signal(SIGSEGV, custom_signal_handler);
     signal(SIGILL, custom_signal_handler);
     signal(SIGABRT, custom_signal_handler);
+    signal(SIGSYS, custom_signal_handler);
 }
 
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
