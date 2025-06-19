@@ -32,17 +32,21 @@ import androidx.lifecycle.LifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.OnLifecycleEvent
 import androidx.lifecycle.coroutineScope
-import com.swordfish.libretrodroid.KtUtils.awaitUninterruptibly
 import com.swordfish.libretrodroid.gamepad.GamepadsManager
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Locale
-import java.util.concurrent.CountDownLatch
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
+import kotlin.coroutines.CoroutineContext
 import kotlin.properties.Delegates
 
 class GLRetroView(
@@ -53,6 +57,14 @@ class GLRetroView(
     private val handler = CoroutineExceptionHandler { _, exception ->
         Log.d("DQC", " ---------- CoroutineExceptionHandler in retro view $exception ")
     }
+
+    private val GLThreadDispatcher: CoroutineDispatcher = object : CoroutineDispatcher() {
+        override fun dispatch(context: CoroutineContext, block: Runnable) {
+            this@GLRetroView.queueEvent(block)
+        }
+    }
+
+    private val GLScope = CoroutineScope(SupervisorJob() + GLThreadDispatcher + handler)
 
     var audioEnabled: Boolean by Delegates.observable(true) { _, _, value ->
         catchExceptions {
@@ -73,8 +85,10 @@ class GLRetroView(
     }
 
     var viewport: RectF by Delegates.observable(RectF(0f, 0f, 1f, 1f)) { _, _, value ->
-        runOnGLThread {
-            LibretroDroid.setViewport(value.left, value.top, value.width(), value.height())
+        GLScope.launch { // Launch a coroutine to run on GLThread
+            runOnGLThread { // Suspend call, block executes on GLThread
+                LibretroDroid.setViewport(value.left, value.top, value.width(), value.height())
+            }
         }
     }
 
@@ -169,27 +183,27 @@ class GLRetroView(
         } ?: PointF(0f, 0f)
     }
 
-    fun serializeState(): ByteArray = runOnGLThread {
+    suspend fun serializeState(): ByteArray = runOnGLThread {
         LibretroDroid.serializeState()
     } ?: byteArrayOf()
 
-    fun setCheat(index: Int, enable: Boolean, code: String) = runOnGLThread {
+    suspend fun setCheat(index: Int, enable: Boolean, code: String) = runOnGLThread {
         LibretroDroid.setCheat(index, enable, code)
     }
 
-    fun unserializeState(data: ByteArray): Boolean = runOnGLThread {
+    suspend fun unserializeState(data: ByteArray): Boolean = runOnGLThread {
         LibretroDroid.unserializeState(data)
     } == true
 
-    fun serializeSRAM(): ByteArray = runOnGLThread {
+    suspend fun serializeSRAM(): ByteArray = runOnGLThread {
         LibretroDroid.serializeSRAM()
     } ?: byteArrayOf()
 
-    fun unserializeSRAM(data: ByteArray): Boolean = runOnGLThread {
+    suspend fun unserializeSRAM(data: ByteArray): Boolean = runOnGLThread {
         LibretroDroid.unserializeSRAM(data)
     } == true
 
-    fun reset() = runOnGLThread {
+    suspend fun reset() = runOnGLThread {
         LibretroDroid.reset()
     }
 
@@ -231,11 +245,11 @@ class GLRetroView(
         }
     }
 
-    fun getAvailableDisks() = runOnGLThread { LibretroDroid.availableDisks() } ?: 0
+    suspend fun getAvailableDisks() = runOnGLThread { LibretroDroid.availableDisks() } ?: 0
 
-    fun getCurrentDisk() = runOnGLThread { LibretroDroid.currentDisk() } ?: 0
+    suspend fun getCurrentDisk() = runOnGLThread { LibretroDroid.currentDisk() } ?: 0
 
-    fun changeDisk(index: Int) = runOnGLThread { LibretroDroid.changeDisk(index) }
+    suspend fun changeDisk(index: Int) = runOnGLThread { LibretroDroid.changeDisk(index) }
 
     private fun getGLESVersion(context: Context): Int {
         val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
@@ -423,21 +437,23 @@ class GLRetroView(
         }
     }
 
-    private fun <T> runOnGLThread(block: () -> T): T? {
-        return catchExceptionsWithResult {
-            if (Thread.currentThread().name.startsWith("GLThread")) {
-                return@catchExceptionsWithResult block()
+    suspend fun <T> runOnGLThread(
+        timeoutMillis: Long = 4500L,
+        block: suspend CoroutineScope.() -> T
+    ): T? {
+        return try {
+            withTimeoutOrNull(timeoutMillis) {
+                if (Thread.currentThread().name.startsWith("GLThread")) {
+                    block()
+                } else {
+                    withContext(GLThreadDispatcher) {
+                        block()
+                    }
+                }
             }
-
-            val latch = CountDownLatch(1)
-            var result: T? = null
-            queueEvent {
-                result = block()
-                latch.countDown()
-            }
-
-            latch.awaitUninterruptibly()
-            result
+        } catch (e: Exception) {
+            Log.e(TAG_LOG, "Exception in runOnGLThread", e)
+            null
         }
     }
 
@@ -530,8 +546,10 @@ class GLRetroView(
     }
 
     private fun refreshAspectRatio() {
-        runOnGLThread {
-            LibretroDroid.refreshAspectRatio()
+        GLScope.launch {
+            runOnGLThread {
+                LibretroDroid.refreshAspectRatio()
+            }
         }
     }
 
