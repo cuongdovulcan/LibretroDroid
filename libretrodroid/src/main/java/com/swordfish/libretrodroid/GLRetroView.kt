@@ -34,25 +34,45 @@ import androidx.lifecycle.OnLifecycleEvent
 import androidx.lifecycle.coroutineScope
 import com.swordfish.libretrodroid.KtUtils.awaitUninterruptibly
 import com.swordfish.libretrodroid.gamepad.GamepadsManager
+import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable.isActive
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
+import kotlin.coroutines.resumeWithException
 import kotlin.properties.Delegates
 
 class GLRetroView(
     context: Context,
-    private val data: GLRetroViewData
+    private val data: GLRetroViewData,
 ) : GLSurfaceView(context), LifecycleObserver {
 
     private val handler = CoroutineExceptionHandler { _, exception ->
         Log.d("DQC", " ---------- CoroutineExceptionHandler in retro view $exception ")
     }
+
+    var timeoutMillis: Long = 4500L
 
     var audioEnabled: Boolean by Delegates.observable(true) { _, _, value ->
         catchExceptions {
@@ -169,27 +189,31 @@ class GLRetroView(
         } ?: PointF(0f, 0f)
     }
 
-    fun serializeState(): ByteArray = runOnGLThread {
+    suspend fun serializeState(): ByteArray = runOnGLThreadWithTimeout("serializeState") {
         LibretroDroid.serializeState()
     } ?: byteArrayOf()
 
-    fun setCheat(index: Int, enable: Boolean, code: String) = runOnGLThread {
+    suspend fun setCheat(index: Int, enable: Boolean, code: String) = runOnGLThreadWithTimeout("setCheat") {
         LibretroDroid.setCheat(index, enable, code)
     }
 
-    fun unserializeState(data: ByteArray): Boolean = runOnGLThread {
+    override fun isVisibleToUserForAutofill(virtualId: Int): Boolean {
+        return super.isVisibleToUserForAutofill(virtualId)
+    }
+
+    suspend fun unserializeState(data: ByteArray): Boolean = runOnGLThreadWithTimeout("unserializeState") {
         LibretroDroid.unserializeState(data)
     } == true
 
-    fun serializeSRAM(): ByteArray = runOnGLThread {
+    suspend fun serializeSRAM(): ByteArray = runOnGLThreadWithTimeout("serializeSRAM") {
         LibretroDroid.serializeSRAM()
     } ?: byteArrayOf()
 
-    fun unserializeSRAM(data: ByteArray): Boolean = runOnGLThread {
+    suspend fun unserializeSRAM(data: ByteArray): Boolean = runOnGLThreadWithTimeout("unserializeSRAM") {
         LibretroDroid.unserializeSRAM(data)
     } == true
 
-    fun reset() = runOnGLThread {
+    suspend fun reset() = runOnGLThreadWithTimeout("reset") {
         LibretroDroid.reset()
     }
 
@@ -231,11 +255,11 @@ class GLRetroView(
         }
     }
 
-    fun getAvailableDisks() = runOnGLThread { LibretroDroid.availableDisks() } ?: 0
+    suspend fun getAvailableDisks() = runOnGLThreadWithTimeout("getAvailableDisks") { LibretroDroid.availableDisks() } ?: 0
 
-    fun getCurrentDisk() = runOnGLThread { LibretroDroid.currentDisk() } ?: 0
+    suspend fun getCurrentDisk() = runOnGLThreadWithTimeout("getCurrentDisk") { LibretroDroid.currentDisk() } ?: 0
 
-    fun changeDisk(index: Int) = runOnGLThread { LibretroDroid.changeDisk(index) }
+    suspend fun changeDisk(index: Int) = runOnGLThreadWithTimeout("changeDisk") { LibretroDroid.changeDisk(index) }
 
     private fun getGLESVersion(context: Context): Int {
         val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
@@ -247,16 +271,16 @@ class GLRetroView(
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-       return catchExceptionsWithResult {
-           val mappedKey = GamepadsManager.getGamepadKeyEvent(keyCode)
-           val port = (event?.device?.controllerNumber ?: 0) - 1
+        return catchExceptionsWithResult {
+            val mappedKey = GamepadsManager.getGamepadKeyEvent(keyCode)
+            val port = (event?.device?.controllerNumber ?: 0) - 1
 
-           if (event != null && port >= 0 && keyCode in GamepadsManager.GAMEPAD_KEYS) {
-               sendKeyEvent(KeyEvent.ACTION_DOWN, mappedKey, port)
-               true
-           }
-           super.onKeyDown(keyCode, event)
-       } == true
+            if (event != null && port >= 0 && keyCode in GamepadsManager.GAMEPAD_KEYS) {
+                sendKeyEvent(KeyEvent.ACTION_DOWN, mappedKey, port)
+                true
+            }
+            super.onKeyDown(keyCode, event)
+        } == true
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
@@ -266,9 +290,9 @@ class GLRetroView(
 
             if (event != null && port >= 0 && keyCode in GamepadsManager.GAMEPAD_KEYS) {
                 sendKeyEvent(KeyEvent.ACTION_UP, mappedKey, port)
-                 true
+                true
             }
-             super.onKeyUp(keyCode, event)
+            super.onKeyUp(keyCode, event)
         } == true
     }
 
@@ -428,16 +452,114 @@ class GLRetroView(
             if (Thread.currentThread().name.startsWith("GLThread")) {
                 return@catchExceptionsWithResult block()
             }
+            val runnable: Runnable
 
             val latch = CountDownLatch(1)
             var result: T? = null
-            queueEvent {
-                result = block()
-                latch.countDown()
+
+            runnable = object : Runnable {
+                override fun run() {
+                    result = block()
+                    latch.countDown()
+                }
+
             }
+            queueEvent { runnable }
 
             latch.awaitUninterruptibly()
             result
+        }
+    }
+
+    suspend fun <T> runOnGLThreadWithTimeout(
+        funcName: String,
+        block: () -> T
+    ): T? {
+        var operationResult: T? = null
+        var operationSuccess = false // To track if block() completed successfully
+
+        val glOperationJob: Job = coroutineScope {
+            async(Dispatchers.Default + handler) { // Assuming 'handler' is defined
+                // Path for unlikely direct GLThread on Default dispatcher
+                if (Thread.currentThread().name.startsWith("GLThread")) {
+                    try {
+                        if (!this.coroutineContext.job.isCancelled) { // Check before block
+                            operationResult = block()
+                            operationSuccess = true
+                        }
+                    } catch (e: Exception) {
+                        Log.e("NativeTimeout", "GL Task (direct): Exception in block", e)
+                    }
+                    return@async
+                }
+
+                val latch = CountDownLatch(1)
+                queueEvent {
+                    try {
+                        // Check cancellation status of the 'async' coroutine
+                        if (!this.coroutineContext.job.isCancelled) {
+                            Log.d("NativeTimeout", "GL Task: Executing block on ${Thread.currentThread().name} - function name $funcName")
+                            operationResult = block()
+                            operationSuccess = true
+                        } else {
+                            Log.w("NativeTimeout", "GL Task: Coroutine cancelled before block execution.")
+                        }
+                    } catch (e: Exception) {
+                        // Only log if not cancelled, because block() might throw due to cancellation
+                        if (!this.coroutineContext.job.isCancelled) {
+                            Log.e("NativeTimeout", "GL Task: Exception in block on GLThread", e)
+                        } else {
+                            Log.w("NativeTimeout", "GL Task: Exception in block, possibly due to cancellation.", e)
+                        }
+                    } finally {
+                        latch.countDown()
+                    }
+                }
+
+                try {
+                    latch.await() // Blocking wait on Dispatchers.Default thread
+                } catch (e: InterruptedException) {
+                    Log.w("NativeTimeout", "GL Task Wait: Latch await interrupted.", e)
+                    Thread.currentThread().interrupt() // Preserve interrupt status
+                    // The coroutine will likely terminate due to cancellation if this happens.
+                }
+
+                if (!operationSuccess && !this.coroutineContext.job.isCancelled) {
+                    Log.w("NativeTimeout", "GL Task: Latch finished but operationResult not set successfully or block failed.")
+                }
+            }
+        }
+
+        try {
+            withTimeout(timeoutMillis) {
+                glOperationJob.join()
+            }
+            // If we reach here, join completed within time.
+            // Check operationSuccess because the job might have completed due to an error in block().
+            return if (operationSuccess) {
+                Log.d("NativeTimeout", "Operation completed successfully within timeout.")
+                operationResult
+            } else {
+                Log.w("NativeTimeout", "Operation completed (no timeout) but was not successful.")
+                null // Or throw an exception if this state is unexpected
+            }
+        } catch (e: TimeoutCancellationException) {
+            Log.w("NativeTimeout", "Operation timed out. Cancelling GL operation job.")
+            glOperationJob.cancelAndJoin() // Suspending call
+            Log.w("NativeTimeout", "GL operation job cancelled due to timeout.")
+            return null
+        } catch (e: Exception) {
+            Log.e("NativeTimeout", "Exception while waiting for GL operation job. Cleaning up.", e)
+            glOperationJob.cancelAndJoin() // Suspending call
+            return null
+        }
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private fun <T> executeBlock(block: () -> T, continuation: CancellableContinuation<T?>) {
+        val result = catchExceptionsWithResult { block() }
+        if (continuation.isActive) {
+            continuation.resume(result, null)
         }
     }
 
