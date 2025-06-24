@@ -34,25 +34,32 @@ import androidx.lifecycle.OnLifecycleEvent
 import androidx.lifecycle.coroutineScope
 import com.swordfish.libretrodroid.KtUtils.awaitUninterruptibly
 import com.swordfish.libretrodroid.gamepad.GamepadsManager
+import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
+import kotlin.coroutines.resumeWithException
 import kotlin.properties.Delegates
 
 class GLRetroView(
     context: Context,
-    private val data: GLRetroViewData
+    private val data: GLRetroViewData,
 ) : GLSurfaceView(context), LifecycleObserver {
 
     private val handler = CoroutineExceptionHandler { _, exception ->
         Log.d("DQC", " ---------- CoroutineExceptionHandler in retro view $exception ")
     }
+
+    var timeoutMillis: Long = 4500L
 
     var audioEnabled: Boolean by Delegates.observable(true) { _, _, value ->
         catchExceptions {
@@ -169,27 +176,31 @@ class GLRetroView(
         } ?: PointF(0f, 0f)
     }
 
-    fun serializeState(): ByteArray = runOnGLThread {
+    suspend fun serializeState(): ByteArray = runOnGLThreadWithTimeout("serializeState") {
         LibretroDroid.serializeState()
     } ?: byteArrayOf()
 
-    fun setCheat(index: Int, enable: Boolean, code: String) = runOnGLThread {
+    suspend fun setCheat(index: Int, enable: Boolean, code: String) = runOnGLThreadWithTimeout("setCheat") {
         LibretroDroid.setCheat(index, enable, code)
     }
 
-    fun unserializeState(data: ByteArray): Boolean = runOnGLThread {
+    override fun isVisibleToUserForAutofill(virtualId: Int): Boolean {
+        return super.isVisibleToUserForAutofill(virtualId)
+    }
+
+    suspend fun unserializeState(data: ByteArray): Boolean = runOnGLThreadWithTimeout("unserializeState") {
         LibretroDroid.unserializeState(data)
     } == true
 
-    fun serializeSRAM(): ByteArray = runOnGLThread {
+    suspend fun serializeSRAM(): ByteArray = runOnGLThreadWithTimeout("serializeSRAM") {
         LibretroDroid.serializeSRAM()
     } ?: byteArrayOf()
 
-    fun unserializeSRAM(data: ByteArray): Boolean = runOnGLThread {
+    suspend fun unserializeSRAM(data: ByteArray): Boolean = runOnGLThreadWithTimeout("unserializeSRAM") {
         LibretroDroid.unserializeSRAM(data)
     } == true
 
-    fun reset() = runOnGLThread {
+    suspend fun reset() = runOnGLThreadWithTimeout("reset") {
         LibretroDroid.reset()
     }
 
@@ -231,11 +242,11 @@ class GLRetroView(
         }
     }
 
-    fun getAvailableDisks() = runOnGLThread { LibretroDroid.availableDisks() } ?: 0
+    suspend fun getAvailableDisks() = runOnGLThreadWithTimeout("getAvailableDisks") { LibretroDroid.availableDisks() } ?: 0
 
-    fun getCurrentDisk() = runOnGLThread { LibretroDroid.currentDisk() } ?: 0
+    suspend fun getCurrentDisk() = runOnGLThreadWithTimeout("getCurrentDisk") { LibretroDroid.currentDisk() } ?: 0
 
-    fun changeDisk(index: Int) = runOnGLThread { LibretroDroid.changeDisk(index) }
+    suspend fun changeDisk(index: Int) = runOnGLThreadWithTimeout("changeDisk") { LibretroDroid.changeDisk(index) }
 
     private fun getGLESVersion(context: Context): Int {
         val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
@@ -247,16 +258,16 @@ class GLRetroView(
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-       return catchExceptionsWithResult {
-           val mappedKey = GamepadsManager.getGamepadKeyEvent(keyCode)
-           val port = (event?.device?.controllerNumber ?: 0) - 1
+        return catchExceptionsWithResult {
+            val mappedKey = GamepadsManager.getGamepadKeyEvent(keyCode)
+            val port = (event?.device?.controllerNumber ?: 0) - 1
 
-           if (event != null && port >= 0 && keyCode in GamepadsManager.GAMEPAD_KEYS) {
-               sendKeyEvent(KeyEvent.ACTION_DOWN, mappedKey, port)
-               true
-           }
-           super.onKeyDown(keyCode, event)
-       } == true
+            if (event != null && port >= 0 && keyCode in GamepadsManager.GAMEPAD_KEYS) {
+                sendKeyEvent(KeyEvent.ACTION_DOWN, mappedKey, port)
+                true
+            }
+            super.onKeyDown(keyCode, event)
+        } == true
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
@@ -266,9 +277,9 @@ class GLRetroView(
 
             if (event != null && port >= 0 && keyCode in GamepadsManager.GAMEPAD_KEYS) {
                 sendKeyEvent(KeyEvent.ACTION_UP, mappedKey, port)
-                 true
+                true
             }
-             super.onKeyUp(keyCode, event)
+            super.onKeyUp(keyCode, event)
         } == true
     }
 
@@ -438,6 +449,47 @@ class GLRetroView(
 
             latch.awaitUninterruptibly()
             result
+        }
+    }
+
+    suspend fun <T> runOnGLThreadWithTimeout(nameFunc: String, block: () -> T): T? {
+        Log.d("NativeTimeout", "Attempting to serialize state with timeout: $timeoutMillis ms - nameFunc $nameFunc")
+        return try {
+            withTimeoutOrNull(timeoutMillis) {
+                // This block will be cancelled if it takes longer than timeoutMillis
+                Log.d("NativeTimeout", "Coroutine started: Calling runOnGLThreadSuspending for serializeState.")
+                if (Thread.currentThread().name.startsWith("GLThread")) {
+                    return@withTimeoutOrNull block()
+                }
+
+                val latch = CountDownLatch(1)
+                var result: T? = null
+                queueEvent {
+                    Log.d("NativeTimeout", "Coroutine started: call block  ${Thread.currentThread().name}")
+                    result = block()
+                    latch.countDown()
+                }
+
+                latch.awaitUninterruptibly()
+                result
+            }
+        } catch (e: Exception) { // Catch other potential exceptions from runOnGLThreadSuspending itself
+            Log.e("NativeTimeout", "Exception during serializeStateWithTimeout, not a timeout.", e)
+            null
+        }.also { result ->
+            if (result == null) {
+                Log.w("NativeTimeout", "serializeStateWithTimeout: Operation timed out or failed, returned null.")
+            } else {
+                Log.d("NativeTimeout", "serializeStateWithTimeout: Operation successful within timeout.")
+            }
+        }
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private fun <T> executeBlock(block: () -> T, continuation: CancellableContinuation<T?>) {
+        val result = catchExceptionsWithResult { block() }
+        if (continuation.isActive) {
+            continuation.resume(result, null)
         }
     }
 
