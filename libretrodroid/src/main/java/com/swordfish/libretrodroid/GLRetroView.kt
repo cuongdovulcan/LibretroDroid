@@ -36,6 +36,7 @@ import com.swordfish.libretrodroid.gamepad.GamepadsManager
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
@@ -64,7 +65,8 @@ class GLRetroView(
         }
     }
 
-    private val GLScope = CoroutineScope(SupervisorJob() + GLThreadDispatcher + handler)
+    private val backgroundContext = Dispatchers.Default + handler
+    private val GLScope = CoroutineScope(SupervisorJob() + backgroundContext)
 
     var audioEnabled: Boolean by Delegates.observable(true) { _, _, value ->
         catchExceptions {
@@ -184,6 +186,8 @@ class GLRetroView(
     }
 
     suspend fun serializeState(): ByteArray = runOnGLThread {
+        Log.d("DQC", "runOnGLThread:serializeState ")
+
         LibretroDroid.serializeState()
     } ?: byteArrayOf()
 
@@ -192,18 +196,26 @@ class GLRetroView(
     }
 
     suspend fun unserializeState(data: ByteArray): Boolean = runOnGLThread {
+        Log.d("DQC", "runOnGLThread:unserializeState data ${data.size}")
+
         LibretroDroid.unserializeState(data)
     } == true
 
     suspend fun serializeSRAM(): ByteArray = runOnGLThread {
+        Log.d("DQC", "runOnGLThread:serializeSRAM data")
+
         LibretroDroid.serializeSRAM()
     } ?: byteArrayOf()
 
     suspend fun unserializeSRAM(data: ByteArray): Boolean = runOnGLThread {
+        Log.d("DQC", "runOnGLThread:unserializeSRAM data ${data.size}")
+
         LibretroDroid.unserializeSRAM(data)
     } == true
 
     suspend fun reset() = runOnGLThread {
+        Log.d("DQC", "runOnGLThread:reset")
+
         LibretroDroid.reset()
     }
 
@@ -261,16 +273,16 @@ class GLRetroView(
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-       return catchExceptionsWithResult {
-           val mappedKey = GamepadsManager.getGamepadKeyEvent(keyCode)
-           val port = (event?.device?.controllerNumber ?: 0) - 1
+        return catchExceptionsWithResult {
+            val mappedKey = GamepadsManager.getGamepadKeyEvent(keyCode)
+            val port = (event?.device?.controllerNumber ?: 0) - 1
 
-           if (event != null && port >= 0 && keyCode in GamepadsManager.GAMEPAD_KEYS) {
-               sendKeyEvent(KeyEvent.ACTION_DOWN, mappedKey, port)
-               true
-           }
-           super.onKeyDown(keyCode, event)
-       } == true
+            if (event != null && port >= 0 && keyCode in GamepadsManager.GAMEPAD_KEYS) {
+                sendKeyEvent(KeyEvent.ACTION_DOWN, mappedKey, port)
+                true
+            }
+            super.onKeyDown(keyCode, event)
+        } == true
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
@@ -280,9 +292,9 @@ class GLRetroView(
 
             if (event != null && port >= 0 && keyCode in GamepadsManager.GAMEPAD_KEYS) {
                 sendKeyEvent(KeyEvent.ACTION_UP, mappedKey, port)
-                 true
+                true
             }
-             super.onKeyUp(keyCode, event)
+            super.onKeyUp(keyCode, event)
         } == true
     }
 
@@ -441,17 +453,22 @@ class GLRetroView(
         timeoutMillis: Long = 4500L,
         block: suspend CoroutineScope.() -> T
     ): T? {
+        Log.d("DQC", "runOnGLThread:timeoutMillis $timeoutMillis ")
         return try {
             withTimeoutOrNull(timeoutMillis) {
                 if (Thread.currentThread().name.startsWith("GLThread")) {
                     block()
                 } else {
-                    withContext(GLThreadDispatcher) {
+                    withContext(backgroundContext) {
+                        Log.d("DQC", "runOnGLThread: Enter block")
+
                         block()
                     }
                 }
             }
         } catch (e: Exception) {
+            Log.d("DQC", "Exception: ${e.message}")
+
             Log.e(TAG_LOG, "Exception in runOnGLThread", e)
             null
         }
@@ -552,6 +569,8 @@ class GLRetroView(
             }
         }
     }
+
+
 
     sealed class GLRetroEvents {
         object FrameRendered : GLRetroEvents()
