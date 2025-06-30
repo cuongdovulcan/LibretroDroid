@@ -33,38 +33,39 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.OnLifecycleEvent
 import androidx.lifecycle.coroutineScope
 import com.swordfish.libretrodroid.gamepad.GamepadsManager
-import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.plus
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Locale
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
-import kotlin.coroutines.CoroutineContext
 import kotlin.properties.Delegates
 
 class GLRetroView(
     context: Context,
-    private val data: GLRetroViewData
+    private val data: GLRetroViewData,
 ) : GLSurfaceView(context), LifecycleObserver {
 
     private val handler = CoroutineExceptionHandler { _, exception ->
         Log.d("DQC", " ---------- CoroutineExceptionHandler in retro view $exception ")
     }
 
-    private val GLThreadDispatcher: CoroutineDispatcher = object : CoroutineDispatcher() {
-        override fun dispatch(context: CoroutineContext, block: Runnable) {
-            this@GLRetroView.queueEvent(block)
-        }
-    }
-
-    private val GLScope = CoroutineScope(SupervisorJob() + GLThreadDispatcher + handler)
+    private val backgroundContext = Dispatchers.Default + handler
+    private val GLScope = CoroutineScope(SupervisorJob() + backgroundContext)
 
     var audioEnabled: Boolean by Delegates.observable(true) { _, _, value ->
         catchExceptions {
@@ -184,6 +185,8 @@ class GLRetroView(
     }
 
     suspend fun serializeState(): ByteArray = runOnGLThread {
+        Log.d("DQC", "runOnGLThread:serializeState ")
+
         LibretroDroid.serializeState()
     } ?: byteArrayOf()
 
@@ -192,18 +195,26 @@ class GLRetroView(
     }
 
     suspend fun unserializeState(data: ByteArray): Boolean = runOnGLThread {
+        Log.d("DQC", "runOnGLThread:unserializeState data ${data.size}")
+
         LibretroDroid.unserializeState(data)
     } == true
 
     suspend fun serializeSRAM(): ByteArray = runOnGLThread {
+        Log.d("DQC", "runOnGLThread:serializeSRAM data")
+
         LibretroDroid.serializeSRAM()
     } ?: byteArrayOf()
 
     suspend fun unserializeSRAM(data: ByteArray): Boolean = runOnGLThread {
+        Log.d("DQC", "runOnGLThread:unserializeSRAM data ${data.size}")
+
         LibretroDroid.unserializeSRAM(data)
     } == true
 
     suspend fun reset() = runOnGLThread {
+        Log.d("DQC", "runOnGLThread:reset")
+
         LibretroDroid.reset()
     }
 
@@ -261,16 +272,16 @@ class GLRetroView(
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-       return catchExceptionsWithResult {
-           val mappedKey = GamepadsManager.getGamepadKeyEvent(keyCode)
-           val port = (event?.device?.controllerNumber ?: 0) - 1
+        return catchExceptionsWithResult {
+            val mappedKey = GamepadsManager.getGamepadKeyEvent(keyCode)
+            val port = (event?.device?.controllerNumber ?: 0) - 1
 
-           if (event != null && port >= 0 && keyCode in GamepadsManager.GAMEPAD_KEYS) {
-               sendKeyEvent(KeyEvent.ACTION_DOWN, mappedKey, port)
-               true
-           }
-           super.onKeyDown(keyCode, event)
-       } == true
+            if (event != null && port >= 0 && keyCode in GamepadsManager.GAMEPAD_KEYS) {
+                sendKeyEvent(KeyEvent.ACTION_DOWN, mappedKey, port)
+                true
+            }
+            super.onKeyDown(keyCode, event)
+        } == true
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
@@ -280,9 +291,9 @@ class GLRetroView(
 
             if (event != null && port >= 0 && keyCode in GamepadsManager.GAMEPAD_KEYS) {
                 sendKeyEvent(KeyEvent.ACTION_UP, mappedKey, port)
-                 true
+                true
             }
-             super.onKeyUp(keyCode, event)
+            super.onKeyUp(keyCode, event)
         } == true
     }
 
@@ -438,22 +449,42 @@ class GLRetroView(
     }
 
     suspend fun <T> runOnGLThread(
-        timeoutMillis: Long = 4500L,
-        block: suspend CoroutineScope.() -> T
+        overallTimeoutMillis: Long = 4500L,
+        block: suspend CoroutineScope.() -> T,
     ): T? {
-        return try {
-            withTimeoutOrNull(timeoutMillis) {
-                if (Thread.currentThread().name.startsWith("GLThread")) {
+        val blockRunnerScope = CoroutineScope(backgroundContext + SupervisorJob())
+
+        val deferredResult: Deferred<T?> = blockRunnerScope.async {
+            val result: T?
+            if (Thread.currentThread().name.startsWith("GLThread")) {
+                result = block()
+            } else {
+                result = withContext(backgroundContext) {
                     block()
-                } else {
-                    withContext(GLThreadDispatcher) {
-                        block()
-                    }
                 }
             }
+            result
+        }
+
+        try {
+            val result = withTimeout(overallTimeoutMillis) {
+                deferredResult.await()
+            }
+            return result
+        } catch (e: TimeoutCancellationException) {
+            deferredResult.cancel("Overall timeout reached", e)
+            GlobalScope.launch {
+                retroGLIssuesErrors.emit(LibretroDroid.ERROR_GENERIC)
+            }
+            return null
         } catch (e: Exception) {
-            Log.e(TAG_LOG, "Exception in runOnGLThread", e)
-            null
+            deferredResult.cancel("Operation failed with an exception", e as? CancellationException)
+            GlobalScope.launch {
+                retroGLIssuesErrors.emit(LibretroDroid.ERROR_GENERIC)
+            }
+            return null
+        } finally {
+            blockRunnerScope.cancel("runOnGLThread finished or threw an exception")
         }
     }
 
@@ -552,6 +583,7 @@ class GLRetroView(
             }
         }
     }
+
 
     sealed class GLRetroEvents {
         object FrameRendered : GLRetroEvents()
