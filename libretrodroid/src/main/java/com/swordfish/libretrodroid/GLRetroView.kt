@@ -33,38 +33,39 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.OnLifecycleEvent
 import androidx.lifecycle.coroutineScope
 import com.swordfish.libretrodroid.gamepad.GamepadsManager
-import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.plus
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Locale
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
-import kotlin.coroutines.CoroutineContext
 import kotlin.properties.Delegates
 
 class GLRetroView(
     context: Context,
-    private val data: GLRetroViewData
+    private val data: GLRetroViewData,
 ) : GLSurfaceView(context), LifecycleObserver {
 
     private val handler = CoroutineExceptionHandler { _, exception ->
         Log.d("DQC", " ---------- CoroutineExceptionHandler in retro view $exception ")
     }
 
-    private val GLThreadDispatcher: CoroutineDispatcher = object : CoroutineDispatcher() {
-        override fun dispatch(context: CoroutineContext, block: Runnable) {
-            this@GLRetroView.queueEvent(block)
-        }
-    }
-
-    private val GLScope = CoroutineScope(SupervisorJob() + GLThreadDispatcher + handler)
+    private val backgroundContext = Dispatchers.Default + handler
+    private val GLScope = CoroutineScope(SupervisorJob() + backgroundContext)
 
     var audioEnabled: Boolean by Delegates.observable(true) { _, _, value ->
         catchExceptions {
@@ -184,6 +185,8 @@ class GLRetroView(
     }
 
     suspend fun serializeState(): ByteArray = runOnGLThread {
+        Log.d("DQC", "runOnGLThread:serializeState ")
+
         LibretroDroid.serializeState()
     } ?: byteArrayOf()
 
@@ -192,18 +195,26 @@ class GLRetroView(
     }
 
     suspend fun unserializeState(data: ByteArray): Boolean = runOnGLThread {
+        Log.d("DQC", "runOnGLThread:unserializeState data ${data.size}")
+
         LibretroDroid.unserializeState(data)
     } == true
 
     suspend fun serializeSRAM(): ByteArray = runOnGLThread {
+        Log.d("DQC", "runOnGLThread:serializeSRAM data")
+
         LibretroDroid.serializeSRAM()
     } ?: byteArrayOf()
 
     suspend fun unserializeSRAM(data: ByteArray): Boolean = runOnGLThread {
+        Log.d("DQC", "runOnGLThread:unserializeSRAM data ${data.size}")
+
         LibretroDroid.unserializeSRAM(data)
     } == true
 
     suspend fun reset() = runOnGLThread {
+        Log.d("DQC", "runOnGLThread:reset")
+
         LibretroDroid.reset()
     }
 
@@ -261,16 +272,16 @@ class GLRetroView(
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-       return catchExceptionsWithResult {
-           val mappedKey = GamepadsManager.getGamepadKeyEvent(keyCode)
-           val port = (event?.device?.controllerNumber ?: 0) - 1
+        return catchExceptionsWithResult {
+            val mappedKey = GamepadsManager.getGamepadKeyEvent(keyCode)
+            val port = (event?.device?.controllerNumber ?: 0) - 1
 
-           if (event != null && port >= 0 && keyCode in GamepadsManager.GAMEPAD_KEYS) {
-               sendKeyEvent(KeyEvent.ACTION_DOWN, mappedKey, port)
-               true
-           }
-           super.onKeyDown(keyCode, event)
-       } == true
+            if (event != null && port >= 0 && keyCode in GamepadsManager.GAMEPAD_KEYS) {
+                sendKeyEvent(KeyEvent.ACTION_DOWN, mappedKey, port)
+                true
+            }
+            super.onKeyDown(keyCode, event)
+        } == true
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
@@ -280,9 +291,9 @@ class GLRetroView(
 
             if (event != null && port >= 0 && keyCode in GamepadsManager.GAMEPAD_KEYS) {
                 sendKeyEvent(KeyEvent.ACTION_UP, mappedKey, port)
-                 true
+                true
             }
-             super.onKeyUp(keyCode, event)
+            super.onKeyUp(keyCode, event)
         } == true
     }
 
@@ -438,22 +449,70 @@ class GLRetroView(
     }
 
     suspend fun <T> runOnGLThread(
-        timeoutMillis: Long = 4500L,
-        block: suspend CoroutineScope.() -> T
-    ): T? {
-        return try {
-            withTimeoutOrNull(timeoutMillis) {
-                if (Thread.currentThread().name.startsWith("GLThread")) {
-                    block()
-                } else {
-                    withContext(GLThreadDispatcher) {
-                        block()
-                    }
+        overallTimeoutMillis: Long = 4500L,
+        block: suspend CoroutineScope.() -> T,
+    ): T? { // Now returns T, as timeout failure will throw. Nulls from block() itself are passed through.
+        Log.d("DQC_RunOnGL", "Entering runOnGLThread. Overall Timeout: $overallTimeoutMillis ms, CurrentThread: ${Thread.currentThread().name}")
+
+        // Create a new scope that can be cancelled independently if needed,
+        // though withTimeout will handle cancellation of the async job.
+        // Use a SupervisorJob if you don't want failure in block() to cancel other potential children of the calling scope.
+        // However, for this specific function, a simple CoroutineScope is okay as withTimeout will manage it.
+        val blockRunnerScope = CoroutineScope(backgroundContext + SupervisorJob()) // Ensure 'coroutineContext' is from the calling suspend function
+
+        val deferredResult: Deferred<T?> = blockRunnerScope.async { // This is Scope 2 (Block Runner)
+            Log.d("DQC_RunOnGL", "Block runner scope (async) started on thread: ${Thread.currentThread().name}")
+            val result: T?
+            if (Thread.currentThread().name.startsWith("GLThread")) {
+                Log.d("DQC_RunOnGL", "Already on GLThread. Executing block directly in async.")
+                result = block()
+            } else {
+                Log.d("DQC_RunOnGL", "Not on GLThread. Switching to backgroundContext in async.")
+                result = withContext(backgroundContext) {
+                    Log.d("DQC_RunOnGL", "Switched to ${Thread.currentThread().name} via backgroundContext. Executing block.")
+                    block() // This is the potentially stuck JNI call
                 }
             }
+            Log.d("DQC_RunOnGL", "Block runner scope (async) finished execution.")
+            result
+        }
+
+        try {
+            // This is Scope 1 (Timeout Checker for the result of Scope 2)
+            Log.d("DQC_RunOnGL", "Waiting for block runner with timeout: $overallTimeoutMillis ms")
+            val result = withTimeout(overallTimeoutMillis) {
+                deferredResult.await()
+            }
+            Log.d("DQC_RunOnGL", "Operation completed successfully within overall timeout. Result: $result")
+            return result
+        } catch (e: TimeoutCancellationException) {
+            Log.e("DQC_RunOnGL", "!!! OVERALL TIMEOUT of $overallTimeoutMillis ms EXCEEDED while waiting for block runner !!!")
+            deferredResult.cancel("Overall timeout reached", e) // Cancel the async block explicitly
+            // This is important: If the JNI call is stuck, this cancellation might not interrupt it,
+            // but it cleans up the coroutine resources and prevents it from completing later if it ever unsticks.
+            // The thread in backgroundContext will remain stuck.
+            GlobalScope.launch {
+                retroGLIssuesErrors.emit(LibretroDroid.ERROR_GENERIC)
+            }
+            return null
         } catch (e: Exception) {
-            Log.e(TAG_LOG, "Exception in runOnGLThread", e)
-            null
+            // This would catch exceptions that occur *during the await()* itself (less likely)
+            // or if block() throws an exception that propagates out of deferredResult.await()
+            // before the timeout (e.g. if the JNI call immediately fails with a Kotlin-mapped exception).
+            Log.e("DQC_RunOnGL", "runOnGLThread caught an unexpected exception during await or from block: ${e::class.java.simpleName} - ${e.message}", e)
+            deferredResult.cancel("Operation failed with an exception", e as? CancellationException)
+            GlobalScope.launch {
+                retroGLIssuesErrors.emit(LibretroDroid.ERROR_GENERIC)
+            }
+            return null
+        } finally {
+            // Ensure the scope for the async task is cancelled if runOnGLThread completes or throws,
+            // though withTimeout's cancellation of deferredResult should handle its underlying job.
+            // Explicitly cancelling the scope can be a good safety measure if not using structured concurrency strictly.
+            // However, if runOnGLThread is part of a larger structured concurrency, this explicit cancel
+            // might be redundant or even interfere if not done carefully.
+            // For a self-contained utility like this, it's safer.
+            blockRunnerScope.cancel("runOnGLThread finished or threw an exception")
         }
     }
 
@@ -552,6 +611,7 @@ class GLRetroView(
             }
         }
     }
+
 
     sealed class GLRetroEvents {
         object FrameRendered : GLRetroEvents()
