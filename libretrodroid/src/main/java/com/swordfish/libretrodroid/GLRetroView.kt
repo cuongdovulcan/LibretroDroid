@@ -36,14 +36,20 @@ import com.swordfish.libretrodroid.gamepad.GamepadsManager
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.asExecutor
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.withTimeout
 import java.util.Locale
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 import kotlin.coroutines.CoroutineContext
@@ -51,20 +57,31 @@ import kotlin.properties.Delegates
 
 class GLRetroView(
     context: Context,
-    private val data: GLRetroViewData
+    private val data: GLRetroViewData,
 ) : GLSurfaceView(context), LifecycleObserver {
+
+    // Option 1: Dedicated dispatcher per session, can be re-created
+    private var nativeOperationDispatcher: CoroutineDispatcher? = null
+
+    private fun ensureNativeDispatcher() {
+        if (nativeOperationDispatcher == null ||
+            (nativeOperationDispatcher?.asExecutor() as? ExecutorService)?.isShutdown == true ||
+            (nativeOperationDispatcher?.asExecutor() as? ExecutorService)?.isTerminated == true ) {
+            Log.i("DQC_Manager", "Creating new nativeOperationDispatcher.")
+            // Attempt to shutdown the old one if it somehow exists and is stuck
+            (nativeOperationDispatcher?.asExecutor() as? ExecutorService)?.shutdownNow()
+            nativeOperationDispatcher = Executors.newSingleThreadExecutor { r ->
+                Thread(r, "LibretroNativeWorker-${System.currentTimeMillis()}").apply { isDaemon = true }
+            }.asCoroutineDispatcher()
+        }
+    }
 
     private val handler = CoroutineExceptionHandler { _, exception ->
         Log.d("DQC", " ---------- CoroutineExceptionHandler in retro view $exception ")
     }
 
-    private val GLThreadDispatcher: CoroutineDispatcher = object : CoroutineDispatcher() {
-        override fun dispatch(context: CoroutineContext, block: Runnable) {
-            this@GLRetroView.queueEvent(block)
-        }
-    }
-
-    private val GLScope = CoroutineScope(SupervisorJob() + GLThreadDispatcher + handler)
+    private val backgroundContext = Dispatchers.Default + handler
+    private val GLScope = CoroutineScope(SupervisorJob() + backgroundContext)
 
     var audioEnabled: Boolean by Delegates.observable(true) { _, _, value ->
         catchExceptions {
@@ -86,7 +103,7 @@ class GLRetroView(
 
     var viewport: RectF by Delegates.observable(RectF(0f, 0f, 1f, 1f)) { _, _, value ->
         GLScope.launch { // Launch a coroutine to run on GLThread
-            runOnGLThread { // Suspend call, block executes on GLThread
+            runOnGLThread(providedDispatcher = nativeOperationDispatcher) { // Suspend call, block executes on GLThread
                 LibretroDroid.setViewport(value.left, value.top, value.width(), value.height())
             }
         }
@@ -183,27 +200,37 @@ class GLRetroView(
         } ?: PointF(0f, 0f)
     }
 
-    suspend fun serializeState(): ByteArray = runOnGLThread {
+    suspend fun serializeState(): ByteArray = runOnGLThread(providedDispatcher = nativeOperationDispatcher) {
+        Log.d("DQC", "runOnGLThread:serializeState ")
+
         LibretroDroid.serializeState()
     } ?: byteArrayOf()
 
-    suspend fun setCheat(index: Int, enable: Boolean, code: String) = runOnGLThread {
+    suspend fun setCheat(index: Int, enable: Boolean, code: String) = runOnGLThread(providedDispatcher = nativeOperationDispatcher) {
         LibretroDroid.setCheat(index, enable, code)
     }
 
-    suspend fun unserializeState(data: ByteArray): Boolean = runOnGLThread {
+    suspend fun unserializeState(data: ByteArray): Boolean = runOnGLThread(providedDispatcher = nativeOperationDispatcher) {
+        Log.d("DQC", "runOnGLThread:unserializeState data ${data.size}")
+
         LibretroDroid.unserializeState(data)
     } == true
 
-    suspend fun serializeSRAM(): ByteArray = runOnGLThread {
+    suspend fun serializeSRAM(): ByteArray = runOnGLThread(providedDispatcher = nativeOperationDispatcher) {
+        Log.d("DQC", "runOnGLThread:serializeSRAM data")
+
         LibretroDroid.serializeSRAM()
     } ?: byteArrayOf()
 
-    suspend fun unserializeSRAM(data: ByteArray): Boolean = runOnGLThread {
+    suspend fun unserializeSRAM(data: ByteArray): Boolean = runOnGLThread(providedDispatcher = nativeOperationDispatcher) {
+        Log.d("DQC", "runOnGLThread:unserializeSRAM data ${data.size}")
+
         LibretroDroid.unserializeSRAM(data)
     } == true
 
-    suspend fun reset() = runOnGLThread {
+    suspend fun reset() = runOnGLThread(providedDispatcher = nativeOperationDispatcher) {
+        Log.d("DQC", "runOnGLThread:reset")
+
         LibretroDroid.reset()
     }
 
@@ -245,11 +272,11 @@ class GLRetroView(
         }
     }
 
-    suspend fun getAvailableDisks() = runOnGLThread { LibretroDroid.availableDisks() } ?: 0
+    suspend fun getAvailableDisks() = runOnGLThread(providedDispatcher = nativeOperationDispatcher) { LibretroDroid.availableDisks() } ?: 0
 
-    suspend fun getCurrentDisk() = runOnGLThread { LibretroDroid.currentDisk() } ?: 0
+    suspend fun getCurrentDisk() = runOnGLThread(providedDispatcher = nativeOperationDispatcher) { LibretroDroid.currentDisk() } ?: 0
 
-    suspend fun changeDisk(index: Int) = runOnGLThread { LibretroDroid.changeDisk(index) }
+    suspend fun changeDisk(index: Int) = runOnGLThread(providedDispatcher = nativeOperationDispatcher) { LibretroDroid.changeDisk(index) }
 
     private fun getGLESVersion(context: Context): Int {
         val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
@@ -261,16 +288,16 @@ class GLRetroView(
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-       return catchExceptionsWithResult {
-           val mappedKey = GamepadsManager.getGamepadKeyEvent(keyCode)
-           val port = (event?.device?.controllerNumber ?: 0) - 1
+        return catchExceptionsWithResult {
+            val mappedKey = GamepadsManager.getGamepadKeyEvent(keyCode)
+            val port = (event?.device?.controllerNumber ?: 0) - 1
 
-           if (event != null && port >= 0 && keyCode in GamepadsManager.GAMEPAD_KEYS) {
-               sendKeyEvent(KeyEvent.ACTION_DOWN, mappedKey, port)
-               true
-           }
-           super.onKeyDown(keyCode, event)
-       } == true
+            if (event != null && port >= 0 && keyCode in GamepadsManager.GAMEPAD_KEYS) {
+                sendKeyEvent(KeyEvent.ACTION_DOWN, mappedKey, port)
+                true
+            }
+            super.onKeyDown(keyCode, event)
+        } == true
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
@@ -280,9 +307,9 @@ class GLRetroView(
 
             if (event != null && port >= 0 && keyCode in GamepadsManager.GAMEPAD_KEYS) {
                 sendKeyEvent(KeyEvent.ACTION_UP, mappedKey, port)
-                 true
+                true
             }
-             super.onKeyUp(keyCode, event)
+            super.onKeyUp(keyCode, event)
         } == true
     }
 
@@ -439,22 +466,65 @@ class GLRetroView(
 
     suspend fun <T> runOnGLThread(
         timeoutMillis: Long = 4500L,
-        block: suspend CoroutineScope.() -> T
+        providedDispatcher: CoroutineDispatcher?,
+        block: suspend CoroutineScope.() -> T,
     ): T? {
-        return try {
-            withTimeoutOrNull(timeoutMillis) {
-                if (Thread.currentThread().name.startsWith("GLThread")) {
-                    block()
+        Log.d("DQC_GLRetroView", "runOnGLThread: timeoutMillis $timeoutMillis on ${Thread.currentThread().name} using $providedDispatcher")
+        var resultFromBlock: T? = null
+        try {
+            resultFromBlock = withTimeout(timeoutMillis) {
+                if (Thread.currentThread().name.startsWith("GLThread")) { // GLSurfaceView's render thread
+                    Log.d("DQC_GLRetroView", "Already on GLThread. Executing block.")
+                    block() // Execute directly if already on GL thread (e.g., from onDrawFrame)
                 } else {
-                    withContext(GLThreadDispatcher) {
-                        block()
+                    // Ensure the provided dispatcher is used for offloading JNI
+                    providedDispatcher?.let {
+                        withContext(it) {
+                            Log.d("DQC_GLRetroView", "Switched to ${Thread.currentThread().name} via provided dispatcher. Executing block...")
+                            block()
+                        }
                     }
                 }
             }
+            Log.d("DQC_GLRetroView", "Operation completed successfully within timeout. Result: $resultFromBlock")
+            return resultFromBlock
+        } catch (e: TimeoutCancellationException) {
+            Log.w("DQC_GLRetroView", "TIMEOUT OCCURRED in runOnGLThread after $timeoutMillis ms on dispatcher $providedDispatcher. ${e.message}")
+            handleNativeTimeout("")
+            return null
         } catch (e: Exception) {
-            Log.e(TAG_LOG, "Exception in runOnGLThread", e)
-            null
+            Log.e("DQC_GLRetroView", "Error in runOnGLThread on dispatcher $providedDispatcher: ${e.message}", e)
+            handleNativeTimeout("")
+            return null
         }
+    }
+    private fun handleNativeTimeout(operationName: String) {
+        Log.e("DQC_Manager", "Native operation '$operationName' timed out. The native thread is likely stuck.")
+        // 1. Inform the User
+        //    viewModel.showError("Operation '$operationName' failed due to a timeout. Please try again.")
+
+        // 2. Mark current resources as compromised
+        //    The currentGLRetroView and its associated Libretro core are now suspect.
+        //    The nativeOperationDispatcher's thread is stuck.
+
+        // 3. Trigger a reset/re-initialization strategy:
+        //    Option A: Full reset of the current emulation session
+        Log.i("DQC_Manager", "Initiating full reset of emulation session due to native timeout.")
+        //    - Destroy/remove currentGLRetroView
+        //    - Call LibretroDroid.destroy() (best effort, might also hang if on same stuck thread's context)
+        //    - Set currentGLRetroView = null
+        //    - Forcibly create a NEW nativeOperationDispatcher for the *next* session.
+        //      The old one is abandoned.
+        nativeOperationDispatcher = null // Force recreation on next `ensureNativeDispatcher`
+        //    - Guide user back to game load or menu to start a fresh session.
+
+        //    Option B: (If using a pool of core instances, not shown here)
+        //    - Mark the current core/dispatcher as unhealthy.
+        //    - Switch to a backup core/dispatcher if available.
+        //    - Attempt to asynchronously kill/recreate the unhealthy one.
+
+        // IMPORTANT: You cannot reuse the exact same Libretro core instance or the
+        // dispatcher whose thread is stuck for subsequent critical operations.
     }
 
     private fun buildShader(config: ShaderConfig): GLRetroShader {
@@ -547,11 +617,13 @@ class GLRetroView(
 
     private fun refreshAspectRatio() {
         GLScope.launch {
-            runOnGLThread {
+            runOnGLThread(providedDispatcher = nativeOperationDispatcher) {
                 LibretroDroid.refreshAspectRatio()
             }
         }
     }
+
+
 
     sealed class GLRetroEvents {
         object FrameRendered : GLRetroEvents()
