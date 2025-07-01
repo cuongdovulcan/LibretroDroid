@@ -451,67 +451,39 @@ class GLRetroView(
     suspend fun <T> runOnGLThread(
         overallTimeoutMillis: Long = 6000L,
         block: suspend CoroutineScope.() -> T,
-    ): T? { // Now returns T, as timeout failure will throw. Nulls from block() itself are passed through.
-        Log.d("DQC_RunOnGL", "Entering runOnGLThread. Overall Timeout: $overallTimeoutMillis ms, CurrentThread: ${Thread.currentThread().name}")
+    ): T? {
+        val blockRunnerScope = CoroutineScope(backgroundContext + SupervisorJob())
 
-        // Create a new scope that can be cancelled independently if needed,
-        // though withTimeout will handle cancellation of the async job.
-        // Use a SupervisorJob if you don't want failure in block() to cancel other potential children of the calling scope.
-        // However, for this specific function, a simple CoroutineScope is okay as withTimeout will manage it.
-        val blockRunnerScope = CoroutineScope(backgroundContext + SupervisorJob()) // Ensure 'coroutineContext' is from the calling suspend function
-
-        val deferredResult: Deferred<T?> = blockRunnerScope.async { // This is Scope 2 (Block Runner)
-            Log.d("DQC_RunOnGL", "Block runner scope (async) started on thread: ${Thread.currentThread().name}")
+        val deferredResult: Deferred<T?> = blockRunnerScope.async {
             val result: T?
             if (Thread.currentThread().name.startsWith("GLThread")) {
-                Log.d("DQC_RunOnGL", "Already on GLThread. Executing block directly in async.")
                 result = block()
             } else {
-                Log.d("DQC_RunOnGL", "Not on GLThread. Switching to backgroundContext in async.")
                 result = withContext(backgroundContext) {
-                    Log.d("DQC_RunOnGL", "Switched to ${Thread.currentThread().name} via backgroundContext. Executing block.")
-                    block() // This is the potentially stuck JNI call
+                    block()
                 }
             }
-            Log.d("DQC_RunOnGL", "Block runner scope (async) finished execution.")
             result
         }
 
         try {
-            // This is Scope 1 (Timeout Checker for the result of Scope 2)
-            Log.d("DQC_RunOnGL", "Waiting for block runner with timeout: $overallTimeoutMillis ms")
             val result = withTimeout(overallTimeoutMillis) {
                 deferredResult.await()
             }
-            Log.d("DQC_RunOnGL", "Operation completed successfully within overall timeout. Result: $result")
             return result
         } catch (e: TimeoutCancellationException) {
-            Log.e("DQC_RunOnGL", "!!! OVERALL TIMEOUT of $overallTimeoutMillis ms EXCEEDED while waiting for block runner !!!")
-            deferredResult.cancel("Overall timeout reached", e) // Cancel the async block explicitly
-            // This is important: If the JNI call is stuck, this cancellation might not interrupt it,
-            // but it cleans up the coroutine resources and prevents it from completing later if it ever unsticks.
-            // The thread in backgroundContext will remain stuck.
+            deferredResult.cancel("Overall timeout reached", e)
             GlobalScope.launch {
                 retroGLIssuesErrors.emit(LibretroDroid.ERROR_GENERIC)
             }
             return null
         } catch (e: Exception) {
-            // This would catch exceptions that occur *during the await()* itself (less likely)
-            // or if block() throws an exception that propagates out of deferredResult.await()
-            // before the timeout (e.g. if the JNI call immediately fails with a Kotlin-mapped exception).
-            Log.e("DQC_RunOnGL", "runOnGLThread caught an unexpected exception during await or from block: ${e::class.java.simpleName} - ${e.message}", e)
             deferredResult.cancel("Operation failed with an exception", e as? CancellationException)
             GlobalScope.launch {
                 retroGLIssuesErrors.emit(LibretroDroid.ERROR_GENERIC)
             }
             return null
         } finally {
-            // Ensure the scope for the async task is cancelled if runOnGLThread completes or throws,
-            // though withTimeout's cancellation of deferredResult should handle its underlying job.
-            // Explicitly cancelling the scope can be a good safety measure if not using structured concurrency strictly.
-            // However, if runOnGLThread is part of a larger structured concurrency, this explicit cancel
-            // might be redundant or even interfere if not done carefully.
-            // For a self-contained utility like this, it's safer.
             blockRunnerScope.cancel("runOnGLThread finished or threw an exception")
         }
     }
