@@ -45,6 +45,7 @@
 #include "errorcodes.h"
 #include "vfs/vfs.h"
 #include <csignal>
+#include <cstdlib>
 
 namespace libretrodroid {
 
@@ -664,10 +665,16 @@ void LibretroDroid::setViewport(Rect viewportRect) {
     }
 }
 
+volatile sig_atomic_t shutdown_flag = 0;
 
 void custom_signal_handler(int signum) {
     LOGF("Caught signal %d. This is where the app would normally crash.", signum);
-    signal(signum, SIG_DFL);
+    if (shutdown_flag) {
+        _exit(128 + signum);
+        return;
+    }
+    shutdown_flag = 1;
+    _exit(128 + signum);
 }
 void LibretroDroid::initializeSignalHandlers() {
     LOGI("Initializing custom signal handlers for LibretroDroid...");
