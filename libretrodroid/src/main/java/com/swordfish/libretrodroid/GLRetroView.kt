@@ -32,7 +32,6 @@ import androidx.lifecycle.LifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.OnLifecycleEvent
 import androidx.lifecycle.coroutineScope
-import com.swordfish.libretrodroid.KtUtils.awaitUninterruptibly
 import com.swordfish.libretrodroid.gamepad.GamepadsManager
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.GlobalScope
@@ -41,6 +40,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
 import java.util.Locale
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 import kotlin.properties.Delegates
@@ -431,12 +431,30 @@ class GLRetroView(
 
             val latch = CountDownLatch(1)
             var result: T? = null
+            var exception: Throwable? = null
             queueEvent {
-                result = block()
-                latch.countDown()
+                try {
+                    result = block()
+                } catch (e: Throwable) {
+                    exception = e
+                } finally {
+                    latch.countDown()
+                }
             }
 
-            latch.awaitUninterruptibly()
+            // Use timeout to prevent ANR if native code hangs
+            // 5 seconds should be enough for most operations, but can be adjusted
+            val timeoutSeconds = 5L
+            val success = latch.await(timeoutSeconds, TimeUnit.SECONDS)
+            
+            if (!success) {
+                Log.e(TAG_LOG, "runOnGLThread: Timeout after ${timeoutSeconds}s waiting for GL thread operation. This may indicate a deadlock in native code.")
+                return@catchExceptionsWithResult null
+            }
+            
+            // Re-throw any exception that occurred in the GL thread
+            exception?.let { throw it }
+            
             result
         }
     }
