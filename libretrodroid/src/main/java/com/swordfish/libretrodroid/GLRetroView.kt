@@ -35,9 +35,14 @@ import androidx.lifecycle.coroutineScope
 import com.swordfish.libretrodroid.gamepad.GamepadsManager
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.delay
+import kotlin.coroutines.resume
 import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -73,7 +78,8 @@ class GLRetroView(
     }
 
     var viewport: RectF by Delegates.observable(RectF(0f, 0f, 1f, 1f)) { _, _, value ->
-        runOnGLThread {
+        // Use fire-and-forget to avoid blocking property setter
+        runOnGLThreadAsync {
             LibretroDroid.setViewport(value.left, value.top, value.width(), value.height())
         }
     }
@@ -169,28 +175,126 @@ class GLRetroView(
         } ?: PointF(0f, 0f)
     }
 
-    fun serializeState(): ByteArray = runOnGLThread {
+    /**
+     * Check if the view is ready for operations.
+     * Operations should not be called if this returns false.
+     */
+    fun isReady(): Boolean {
+        return isGameLoaded && !isAborted && isEmulationReady
+    }
+
+    /**
+     * Synchronous version - may cause ANR if native code hangs.
+     * Consider using async versions instead.
+     */
+    fun serializeState(): ByteArray = runOnGLThread(timeoutSeconds = 10L) {
+        if (!isReady()) return@runOnGLThread null
         LibretroDroid.serializeState()
     } ?: byteArrayOf()
 
-    fun setCheat(index: Int, enable: Boolean, code: String) = runOnGLThread {
+    /**
+     * Async version - recommended to prevent ANR.
+     */
+    suspend fun serializeStateAsync(): ByteArray = withContext(Dispatchers.Default) {
+        runOnGLThreadSuspend(timeoutSeconds = 10L) {
+            if (!isReady()) return@runOnGLThreadSuspend null
+            LibretroDroid.serializeState()
+        } ?: byteArrayOf()
+    }
+
+    /**
+     * Synchronous version - may cause ANR if native code hangs.
+     * Consider using async versions instead.
+     */
+    fun setCheat(index: Int, enable: Boolean, code: String) = runOnGLThread(timeoutSeconds = 2L) {
+        if (!isReady()) return@runOnGLThread
         LibretroDroid.setCheat(index, enable, code)
     }
 
-    fun unserializeState(data: ByteArray): Boolean = runOnGLThread {
+    /**
+     * Async version - recommended to prevent ANR.
+     */
+    suspend fun setCheatAsync(index: Int, enable: Boolean, code: String) = withContext(Dispatchers.Default) {
+        runOnGLThreadSuspend(timeoutSeconds = 2L) {
+            if (!isReady()) return@runOnGLThreadSuspend
+            LibretroDroid.setCheat(index, enable, code)
+        }
+    }
+
+    /**
+     * Synchronous version - may cause ANR if native code hangs.
+     * Consider using async versions instead.
+     */
+    fun unserializeState(data: ByteArray): Boolean = runOnGLThread(timeoutSeconds = 10L) {
+        if (!isReady()) return@runOnGLThread false
         LibretroDroid.unserializeState(data)
     } == true
 
-    fun serializeSRAM(): ByteArray = runOnGLThread {
+    /**
+     * Async version - recommended to prevent ANR.
+     */
+    suspend fun unserializeStateAsync(data: ByteArray): Boolean = withContext(Dispatchers.Default) {
+        runOnGLThreadSuspend(timeoutSeconds = 10L) {
+            if (!isReady()) return@runOnGLThreadSuspend false
+            LibretroDroid.unserializeState(data)
+        } == true
+    }
+
+    /**
+     * Synchronous version - may cause ANR if native code hangs.
+     * Consider using async versions instead.
+     */
+    fun serializeSRAM(): ByteArray = runOnGLThread(timeoutSeconds = 5L) {
+        if (!isReady()) return@runOnGLThread null
         LibretroDroid.serializeSRAM()
     } ?: byteArrayOf()
 
-    fun unserializeSRAM(data: ByteArray): Boolean = runOnGLThread {
+    /**
+     * Async version - recommended to prevent ANR.
+     */
+    suspend fun serializeSRAMAsync(): ByteArray = withContext(Dispatchers.Default) {
+        runOnGLThreadSuspend(timeoutSeconds = 5L) {
+            if (!isReady()) return@runOnGLThreadSuspend null
+            LibretroDroid.serializeSRAM()
+        } ?: byteArrayOf()
+    }
+
+    /**
+     * Synchronous version - may cause ANR if native code hangs.
+     * Consider using async versions instead.
+     */
+    fun unserializeSRAM(data: ByteArray): Boolean = runOnGLThread(timeoutSeconds = 5L) {
+        if (!isReady()) return@runOnGLThread false
         LibretroDroid.unserializeSRAM(data)
     } == true
 
-    fun reset() = runOnGLThread {
+    /**
+     * Async version - recommended to prevent ANR.
+     */
+    suspend fun unserializeSRAMAsync(data: ByteArray): Boolean = withContext(Dispatchers.Default) {
+        runOnGLThreadSuspend(timeoutSeconds = 5L) {
+            if (!isReady()) return@runOnGLThreadSuspend false
+            LibretroDroid.unserializeSRAM(data)
+        } == true
+    }
+
+    /**
+     * Synchronous version - may cause ANR if native code hangs.
+     * Consider using async versions instead.
+     */
+    fun reset() = runOnGLThread(timeoutSeconds = 2L) {
+        if (!isReady()) return@runOnGLThread
         LibretroDroid.reset()
+    }
+
+    /**
+     * Async version - recommended to prevent ANR.
+     */
+    suspend fun resetAsync() = withContext(Dispatchers.Default) {
+        runOnGLThreadSuspend(timeoutSeconds = 2L) {
+            if (!isReady()) return@runOnGLThreadSuspend
+            LibretroDroid.reset()
+        }
     }
 
     fun getGLRetroEvents(): Flow<GLRetroEvents> {
@@ -231,11 +335,62 @@ class GLRetroView(
         }
     }
 
-    fun getAvailableDisks() = runOnGLThread { LibretroDroid.availableDisks() } ?: 0
+    /**
+     * Synchronous version - may cause ANR if native code hangs.
+     * Consider using async versions instead.
+     */
+    fun getAvailableDisks() = runOnGLThread(timeoutSeconds = 1L) {
+        if (!isReady()) return@runOnGLThread 0
+        LibretroDroid.availableDisks()
+    } ?: 0
 
-    fun getCurrentDisk() = runOnGLThread { LibretroDroid.currentDisk() } ?: 0
+    /**
+     * Async version - recommended to prevent ANR.
+     */
+    suspend fun getAvailableDisksAsync(): Int = withContext(Dispatchers.Default) {
+        runOnGLThreadSuspend(timeoutSeconds = 1L) {
+            if (!isReady()) return@runOnGLThreadSuspend 0
+            LibretroDroid.availableDisks()
+        } ?: 0
+    }
 
-    fun changeDisk(index: Int) = runOnGLThread { LibretroDroid.changeDisk(index) }
+    /**
+     * Synchronous version - may cause ANR if native code hangs.
+     * Consider using async versions instead.
+     */
+    fun getCurrentDisk() = runOnGLThread(timeoutSeconds = 1L) {
+        if (!isReady()) return@runOnGLThread 0
+        LibretroDroid.currentDisk()
+    } ?: 0
+
+    /**
+     * Async version - recommended to prevent ANR.
+     */
+    suspend fun getCurrentDiskAsync(): Int = withContext(Dispatchers.Default) {
+        runOnGLThreadSuspend(timeoutSeconds = 1L) {
+            if (!isReady()) return@runOnGLThreadSuspend 0
+            LibretroDroid.currentDisk()
+        } ?: 0
+    }
+
+    /**
+     * Synchronous version - may cause ANR if native code hangs.
+     * Consider using async versions instead.
+     */
+    fun changeDisk(index: Int) = runOnGLThread(timeoutSeconds = 2L) {
+        if (!isReady()) return@runOnGLThread
+        LibretroDroid.changeDisk(index)
+    }
+
+    /**
+     * Async version - recommended to prevent ANR.
+     */
+    suspend fun changeDiskAsync(index: Int) = withContext(Dispatchers.Default) {
+        runOnGLThreadSuspend(timeoutSeconds = 2L) {
+            if (!isReady()) return@runOnGLThreadSuspend
+            LibretroDroid.changeDisk(index)
+        }
+    }
 
     private fun getGLESVersion(context: Context): Int {
         val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
@@ -423,10 +578,37 @@ class GLRetroView(
         }
     }
 
-    private fun <T> runOnGLThread(block: () -> T): T? {
+    /**
+     * Fire-and-forget: Queue operation on GL thread without waiting.
+     * Use this for operations that don't need results to avoid blocking.
+     */
+    private fun runOnGLThreadAsync(block: () -> Unit) {
+        catchExceptions {
+            if (Thread.currentThread().name.startsWith("GLThread")) {
+                block()
+            } else {
+                queueEvent {
+                    catchExceptions(block)
+                }
+            }
+        }
+    }
+
+    /**
+     * Synchronous version with configurable timeout.
+     * WARNING: This blocks the calling thread and may cause ANR.
+     * Prefer using runOnGLThreadSuspend for async operations.
+     */
+    private fun <T> runOnGLThread(timeoutSeconds: Long = 5L, block: () -> T): T? {
         return catchExceptionsWithResult {
             if (Thread.currentThread().name.startsWith("GLThread")) {
                 return@catchExceptionsWithResult block()
+            }
+
+            // Check if already aborted before queuing
+            if (isAborted) {
+                Log.w(TAG_LOG, "runOnGLThread: Operation skipped, view is aborted")
+                return@catchExceptionsWithResult null
             }
 
             val latch = CountDownLatch(1)
@@ -434,7 +616,9 @@ class GLRetroView(
             var exception: Throwable? = null
             queueEvent {
                 try {
-                    result = block()
+                    if (!isAborted) {
+                        result = block()
+                    }
                 } catch (e: Throwable) {
                     exception = e
                 } finally {
@@ -442,9 +626,6 @@ class GLRetroView(
                 }
             }
 
-            // Use timeout to prevent ANR if native code hangs
-            // 5 seconds should be enough for most operations, but can be adjusted
-            val timeoutSeconds = 5L
             val success = latch.await(timeoutSeconds, TimeUnit.SECONDS)
             
             if (!success) {
@@ -456,6 +637,62 @@ class GLRetroView(
             exception?.let { throw it }
             
             result
+        }
+    }
+
+    /**
+     * Suspend version - recommended for async operations to prevent ANR.
+     * This doesn't block the calling thread and can be cancelled.
+     * Note: The block parameter should be a regular (non-suspend) function
+     * since it runs on the GL thread which doesn't support coroutines.
+     */
+    private suspend fun <T> runOnGLThreadSuspend(timeoutSeconds: Long = 5L, block: () -> T): T? {
+        return withContext(Dispatchers.Default) {
+            try {
+                if (Thread.currentThread().name.startsWith("GLThread")) {
+                    return@withContext block()
+                }
+
+                // Check if already aborted before queuing
+                if (isAborted) {
+                    Log.w(TAG_LOG, "runOnGLThreadSuspend: Operation skipped, view is aborted")
+                    return@withContext null
+                }
+
+                suspendCancellableCoroutine { continuation ->
+                    var result: T? = null
+                    var exception: Throwable? = null
+                    var completed = false
+                    
+                    queueEvent {
+                        try {
+                            if (!isAborted && !completed) {
+                                result = block()
+                            }
+                        } catch (e: Throwable) {
+                            exception = e
+                        } finally {
+                            if (!completed) {
+                                completed = true
+                                continuation.resume(result) { exception?.let { throw it } }
+                            }
+                        }
+                    }
+
+                    // Set up timeout
+                    GlobalScope.launch(Dispatchers.Default) {
+                        delay(timeoutSeconds * 1000)
+                        if (continuation.isActive && !completed) {
+                            Log.e(TAG_LOG, "runOnGLThreadSuspend: Timeout after ${timeoutSeconds}s waiting for GL thread operation.")
+                            completed = true
+                            continuation.cancel()
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG_LOG, "runOnGLThreadSuspend: Error", e)
+                null
+            }
         }
     }
 
@@ -545,7 +782,7 @@ class GLRetroView(
     }
 
     private fun refreshAspectRatio() {
-        runOnGLThread {
+        runOnGLThreadAsync {
             LibretroDroid.refreshAspectRatio()
         }
     }
