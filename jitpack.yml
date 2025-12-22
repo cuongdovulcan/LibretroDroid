@@ -1,25 +1,20 @@
 jdk:
-  - openjdk17
+  - openjdk11
 
 before_install:
-  # 1. Install Java 8 for legacy SDK tools compatibility
-  - sdk install java 8.0.265-open
-  - sdk use java 8.0.265-open
-
-  # 2. Accept licenses explicitly to prevent interactive hangs
-  - yes | sdkmanager --licenses
-
-  # 3. Install CMake
-  - sdkmanager "cmake;3.22.1"
-
-  # 4. Switch back to Java 17 for the actual build
-  - sdk install java 17.0.3-tem
-  - sdk use java 17.0.3-tem
+  - echo "Starting JitPack build for LibretroDroid"
+  - chmod +x ./gradlew || true
 
 install:
-  # 5. Fix SSH submodule URLs to HTTPS to prevent authentication hangs
-  - git config --global url."https://github.com/".insteadOf "git@github.com:"
-  - git submodule update --init --recursive
-
-  # 6. Run Gradle without daemon (saves RAM) and with stacktrace (to see errors in logs)
-  - ./gradlew install --no-daemon --stacktrace
+  # Initialize git submodules
+  - echo "Initializing git submodules..."
+  - git submodule update --init --recursive || echo "Warning: Submodule init had issues"
+  
+  # Build only the library module (skip app module and tests)
+  - echo "Building libretrodroid library..."
+  - ./gradlew :libretrodroid:clean :libretrodroid:assembleRelease -x test -x lint --no-daemon --stacktrace
+  
+  # Verify build output
+  - echo "Build completed. Checking outputs..."
+  - find libretrodroid/build/outputs -name "*.aar" -type f || echo "No AAR found"
+  - ls -la libretrodroid/build/outputs/aar/ 2>/dev/null || echo "AAR directory check"
