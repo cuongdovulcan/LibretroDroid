@@ -2,14 +2,24 @@ jdk:
   - openjdk17
 
 before_install:
-  # Installing Java 8 because Android SDK manager needs XML Binds which not exists in JDK 17
+  # 1. Install Java 8 for legacy SDK tools compatibility
   - sdk install java 8.0.265-open
   - sdk use java 8.0.265-open
-  - yes | sdkmanager "cmake;3.22.1"
-  # Install JDK 17 and using it for the rest of the build
+
+  # 2. Accept licenses explicitly to prevent interactive hangs
+  - yes | sdkmanager --licenses
+
+  # 3. Install CMake
+  - sdkmanager "cmake;3.22.1"
+
+  # 4. Switch back to Java 17 for the actual build
   - sdk install java 17.0.3-tem
   - sdk use java 17.0.3-tem
 
 install:
+  # 5. Fix SSH submodule URLs to HTTPS to prevent authentication hangs
+  - git config --global url."https://github.com/".insteadOf "git@github.com:"
   - git submodule update --init --recursive
-  - ./gradlew install
+
+  # 6. Run Gradle without daemon (saves RAM) and with stacktrace (to see errors in logs)
+  - ./gradlew install --no-daemon --stacktrace
