@@ -24,6 +24,7 @@
 #include <vector>
 #include <unordered_set>
 #include <mutex>
+#include <optional>
 
 #include "libretrodroid.h"
 #include "log.h"
@@ -417,7 +418,7 @@ JNIEXPORT void JNICALL Java_com_swordfish_libretrodroid_LibretroDroid_create(
     jboolean enableVirtualFileSystem,
     jboolean enableMicrophone,
     jboolean skipDuplicateFrames,
-    jboolean enableAmbientMode,
+    jobject immersiveMode,
     jstring language
 ) {
     try {
@@ -434,6 +435,26 @@ JNIEXPORT void JNICALL Java_com_swordfish_libretrodroid_LibretroDroid_create(
             variables.push_back(variable);
         }
 
+        std::optional<ImmersiveMode::Config> parsedConfig = std::nullopt;
+        if (immersiveMode != nullptr) {
+            jclass configClass = env->GetObjectClass(immersiveMode);
+            jfieldID downscaledWidthField = env->GetFieldID(configClass, "downscaledWidth", "I");
+            jfieldID downscaledHeightField = env->GetFieldID(configClass, "downscaledHeight", "I");
+            jfieldID blurMaskSizeField = env->GetFieldID(configClass, "blurMaskSize", "I");
+            jfieldID blurBrightnessField = env->GetFieldID(configClass, "blurBrightness", "F");
+            jfieldID blurSkipUpdateField = env->GetFieldID(configClass, "blurSkipUpdate", "I");
+            jfieldID blendFactorField = env->GetFieldID(configClass, "blendFactor", "F");
+
+            ImmersiveMode::Config config {};
+            config.downscaledWidth = env->GetIntField(immersiveMode, downscaledWidthField);
+            config.downscaledHeight = env->GetIntField(immersiveMode, downscaledHeightField);
+            config.blurMaskSize = env->GetIntField(immersiveMode, blurMaskSizeField);
+            config.blurBrightness = env->GetFloatField(immersiveMode, blurBrightnessField);
+            config.blurSkipUpdate = env->GetIntField(immersiveMode, blurSkipUpdateField);
+            config.blendFactor = env->GetFloatField(immersiveMode, blendFactorField);
+            parsedConfig = config;
+        }
+
         LibretroDroid::getInstance().create(
             GLESVersion,
             corePath.stdString(),
@@ -446,7 +467,7 @@ JNIEXPORT void JNICALL Java_com_swordfish_libretrodroid_LibretroDroid_create(
             enableVirtualFileSystem,
             enableMicrophone,
             skipDuplicateFrames,
-            enableAmbientMode,
+            parsedConfig,
             deviceLanguage.stdString()
         );
 

@@ -200,15 +200,16 @@ namespace libretrodroid {
                 Environment::getInstance().getPixelFormat()
         };
 
-        auto newVideo = new Video(
-                renderingOptions,
-                fragmentShaderConfig,
-                Environment::getInstance().isBottomLeftOrigin(),
-                Environment::getInstance().getScreenRotation(),
-                skipDuplicateFrames,
-                ambientMode,
-                viewportRect
-        );
+    auto newVideo = new Video(
+        renderingOptions,
+        fragmentShaderConfig,
+        Environment::getInstance().isBottomLeftOrigin(),
+        Environment::getInstance().getScreenRotation(),
+        skipDuplicateFrames,
+        immersiveModeEnabled,
+        viewportRect,
+        immersiveModeConfig
+    );
 
         video = std::unique_ptr<Video>(newVideo);
 
@@ -244,22 +245,22 @@ namespace libretrodroid {
         }
     }
 
-    void LibretroDroid::create(
-            unsigned int GLESVersion,
-            const std::string& soFilePath,
-            const std::string& systemDir,
-            const std::string& savesDir,
-            std::vector<Variable> variables,
-            const ShaderManager::Config& shaderConfig,
-            float refreshRate,
-            bool lowLatencyAudio,
-            bool enableVirtualFileSystem,
-            bool enableMicrophone,
-            bool duplicateFrames,
-            bool enableAmbientMode,
-            const std::string& language
-    ) {
-        LOGD("Performing libretrodroid create");
+void LibretroDroid::create(
+    unsigned int GLESVersion,
+    const std::string& soFilePath,
+    const std::string& systemDir,
+    const std::string& savesDir,
+    std::vector<Variable> variables,
+    const ShaderManager::Config& shaderConfig,
+    float refreshRate,
+    bool lowLatencyAudio,
+    bool enableVirtualFileSystem,
+    bool enableMicrophone,
+    bool duplicateFrames,
+    std::optional<ImmersiveMode::Config> immersiveModeConfig,
+    const std::string& language
+) {
+    LOGD("Performing libretrodroid create");
 
         resetGlobalVariables();
 
@@ -268,12 +269,13 @@ namespace libretrodroid {
         Environment::getInstance().setEnableVirtualFileSystem(enableVirtualFileSystem);
         Environment::getInstance().setEnableMicrophone(enableMicrophone);
 
-        openglESVersion = GLESVersion;
-        screenRefreshRate = refreshRate;
-        skipDuplicateFrames = duplicateFrames;
-        ambientMode = GLESVersion >= 3 && enableAmbientMode;
-        audioEnabled = true;
-        frameSpeed = 1;
+    openglESVersion = GLESVersion;
+    screenRefreshRate = refreshRate;
+    skipDuplicateFrames = duplicateFrames;
+    immersiveModeEnabled = GLESVersion >= 3 && immersiveModeConfig.has_value();
+    this->immersiveModeConfig = immersiveModeConfig.value_or(ImmersiveMode::Config{});
+    audioEnabled = true;
+    frameSpeed = 1;
 
         core = std::make_unique<Core>(soFilePath);
 
