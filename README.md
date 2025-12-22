@@ -35,7 +35,9 @@ LibretroDroid can be added to a standard build.gradle file.
 [app/build.gradle]
 dependencies {
     ...
-    implementation 'com.github.swordfish90:libretrodroid:<version>'
+    implementation 'com.github.cuongdovulcan:LibretroDroid:<version>'
     ...
 }
 ```
+
+Note: Replace `<version>` with the release tag (e.g., `1.2.1`) or use `-SNAPSHOT` for the latest commit.
