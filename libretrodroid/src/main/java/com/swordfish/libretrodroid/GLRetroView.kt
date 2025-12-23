@@ -36,6 +36,7 @@ import com.swordfish.libretrodroid.gamepad.GamepadsManager
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
@@ -624,30 +625,51 @@ class GLRetroView(
      * since it runs on the GL thread which doesn't support coroutines.
      */
     private suspend fun <T> runOnGLThreadSuspend(timeoutSeconds: Long = 5L, block: () -> T): T? {
-        if (Thread.currentThread().name.startsWith("GLThread")) {
-            return try {
-                block()
-            } catch (e: Exception) {
-                null
-            }
-        }
+        return withContext(Dispatchers.Default) {
+            try {
+                if (Thread.currentThread().name.startsWith("GLThread")) {
+                    return@withContext block()
+                }
 
-        if (isAborted) return null
+                // Check if already aborted before queuing
+                if (isAborted) {
+                    Log.w(TAG_LOG, "runOnGLThreadSuspend: Operation skipped, view is aborted")
+                    return@withContext null
+                }
 
-        return kotlinx.coroutines.withTimeoutOrNull(timeoutSeconds * 1000) {
-            suspendCancellableCoroutine<T> { continuation ->
-                queueEvent {
-                    try {
-                        if (continuation.isActive && !isAborted) {
-                            val result = block()
-                            continuation.resume(result)
+                suspendCancellableCoroutine { continuation ->
+                    var result: T? = null
+                    var exception: Throwable? = null
+                    var completed = false
+
+                    queueEvent {
+                        try {
+                            if (!isAborted && !completed) {
+                                result = block()
+                            }
+                        } catch (e: Throwable) {
+                            exception = e
+                        } finally {
+                            if (!completed) {
+                                completed = true
+                                continuation.resume(result) { exception?.let { throw it } }
+                            }
                         }
-                    } catch (e: Throwable) {
-                        if (continuation.isActive) {
-                            continuation.resumeWithException(e)
+                    }
+
+                    // Set up timeout
+                    GlobalScope.launch(Dispatchers.Default) {
+                        delay(timeoutSeconds * 1000)
+                        if (continuation.isActive && !completed) {
+                            Log.e(TAG_LOG, "runOnGLThreadSuspend: Timeout after ${timeoutSeconds}s waiting for GL thread operation.")
+                            completed = true
+                            continuation.cancel()
                         }
                     }
                 }
+            } catch (e: Exception) {
+                Log.e(TAG_LOG, "runOnGLThreadSuspend: Error", e)
+                null
             }
         }
     }
