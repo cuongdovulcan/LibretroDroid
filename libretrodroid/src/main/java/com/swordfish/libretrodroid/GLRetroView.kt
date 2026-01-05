@@ -40,13 +40,14 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
 import java.util.Locale
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 import kotlin.properties.Delegates
 
 class GLRetroView(
     context: Context,
-    private val data: GLRetroViewData
+    private val data: GLRetroViewData,
 ) : GLSurfaceView(context), DefaultLifecycleObserver {
 
     private val lifeCycleHandler by lazy { RenderLifecycleObserver() }
@@ -249,16 +250,16 @@ class GLRetroView(
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-       return catchExceptionsWithResult {
-           val mappedKey = GamepadsManager.getGamepadKeyEvent(keyCode)
-           val port = (event?.device?.controllerNumber ?: 0) - 1
+        return catchExceptionsWithResult {
+            val mappedKey = GamepadsManager.getGamepadKeyEvent(keyCode)
+            val port = (event?.device?.controllerNumber ?: 0) - 1
 
-           if (event != null && port >= 0 && keyCode in GamepadsManager.GAMEPAD_KEYS) {
-               sendKeyEvent(KeyEvent.ACTION_DOWN, mappedKey, port)
-               true
-           }
-           super.onKeyDown(keyCode, event)
-       } == true
+            if (event != null && port >= 0 && keyCode in GamepadsManager.GAMEPAD_KEYS) {
+                sendKeyEvent(KeyEvent.ACTION_DOWN, mappedKey, port)
+                true
+            }
+            super.onKeyDown(keyCode, event)
+        } == true
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
@@ -268,9 +269,9 @@ class GLRetroView(
 
             if (event != null && port >= 0 && keyCode in GamepadsManager.GAMEPAD_KEYS) {
                 sendKeyEvent(KeyEvent.ACTION_UP, mappedKey, port)
-                 true
+                true
             }
-             super.onKeyUp(keyCode, event)
+            super.onKeyUp(keyCode, event)
         } == true
     }
 
@@ -308,15 +309,35 @@ class GLRetroView(
     // These functions are called only after the GLSurfaceView has been created.
     private inner class RenderLifecycleObserver : DefaultLifecycleObserver {
         override fun onResume(owner: LifecycleOwner) = catchExceptions {
-            LibretroDroid.resume()
             onResume()
-            isEmulationReady = true
+            queueEvent {
+                try {
+                    LibretroDroid.resume()
+                    isEmulationReady = true
+                } catch (e: Exception) {
+                    Log.e(TAG_LOG, "Error resuming core", e)
+                }
+            }
         }
 
         override fun onPause(owner: LifecycleOwner) = catchExceptions {
             isEmulationReady = false
+            val latch = CountDownLatch(1)
+            
+            queueEvent {
+                try {
+                    LibretroDroid.pause()
+                } finally {
+                    latch.countDown()
+                }
+            }
+
+            try {
+                latch.await(500, TimeUnit.MILLISECONDS)
+            } catch (e: InterruptedException) {
+            }
+
             onPause()
-            LibretroDroid.pause()
         }
     }
 
