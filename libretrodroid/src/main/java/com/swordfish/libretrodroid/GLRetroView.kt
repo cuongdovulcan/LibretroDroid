@@ -27,10 +27,9 @@ import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.WindowManager
+import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleObserver
 import androidx.lifecycle.LifecycleOwner
-import androidx.lifecycle.OnLifecycleEvent
 import androidx.lifecycle.coroutineScope
 import com.swordfish.libretrodroid.KtUtils.awaitUninterruptibly
 import com.swordfish.libretrodroid.gamepad.GamepadsManager
@@ -48,7 +47,9 @@ import kotlin.properties.Delegates
 class GLRetroView(
     context: Context,
     private val data: GLRetroViewData
-) : GLSurfaceView(context), LifecycleObserver {
+) : GLSurfaceView(context), DefaultLifecycleObserver {
+
+    private val lifeCycleHandler by lazy { RenderLifecycleObserver() }
 
     private val handler = CoroutineExceptionHandler { _, exception ->
         Log.d("DQC", " ---------- CoroutineExceptionHandler in retro view $exception ")
@@ -101,9 +102,8 @@ class GLRetroView(
         }
     }
 
-    @OnLifecycleEvent(Lifecycle.Event.ON_CREATE)
-    fun onCreate(lifecycleOwner: LifecycleOwner) = catchExceptions {
-        lifecycle = lifecycleOwner.lifecycle
+    override fun onCreate(owner: LifecycleOwner) = catchExceptions {
+        lifecycle = owner.lifecycle
         LibretroDroid.create(
             openGLESVersion,
             data.coreFilePath,
@@ -122,10 +122,12 @@ class GLRetroView(
         LibretroDroid.setRumbleEnabled(data.rumbleEventsEnabled)
     }
 
-    @OnLifecycleEvent(Lifecycle.Event.ON_DESTROY)
-    fun onDestroy() = catchExceptions {
+    override fun onDestroy(owner: LifecycleOwner) = catchExceptions {
         LibretroDroid.destroy()
         lifecycle = null
+        KtUtils.runOnUIThread {
+            lifecycle?.removeObserver(lifeCycleHandler)
+        }
     }
 
     private fun getDeviceLanguage() = catchExceptionsWithResult {
@@ -304,16 +306,14 @@ class GLRetroView(
     }
 
     // These functions are called only after the GLSurfaceView has been created.
-    private inner class RenderLifecycleObserver : LifecycleObserver {
-        @OnLifecycleEvent(Lifecycle.Event.ON_RESUME)
-        private fun resume() = catchExceptions {
+    private inner class RenderLifecycleObserver : DefaultLifecycleObserver {
+        override fun onResume(owner: LifecycleOwner) = catchExceptions {
             LibretroDroid.resume()
             onResume()
             isEmulationReady = true
         }
 
-        @OnLifecycleEvent(Lifecycle.Event.ON_PAUSE)
-        private fun pause() = catchExceptions {
+        override fun onPause(owner: LifecycleOwner) = catchExceptions {
             isEmulationReady = false
             onPause()
             LibretroDroid.pause()
@@ -361,7 +361,7 @@ class GLRetroView(
         isGameLoaded = true
 
         KtUtils.runOnUIThread {
-            lifecycle?.addObserver(RenderLifecycleObserver())
+            lifecycle?.addObserver(lifeCycleHandler)
         }
     }
 
