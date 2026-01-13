@@ -111,87 +111,75 @@ JNIEXPORT jobjectArray JNICALL Java_com_swordfish_libretrodroid_LibretroDroid_ge
     JNIEnv* env,
     jclass obj
 ) {
-    try {
-        jclass variableClass = env->FindClass("com/swordfish/libretrodroid/Variable");
-        jmethodID variableMethodID = env->GetMethodID(variableClass, "<init>", "()V");
+    jclass variableClass = env->FindClass("com/swordfish/libretrodroid/Variable");
+    jmethodID variableMethodID = env->GetMethodID(variableClass, "<init>", "()V");
 
-        auto variables = Environment::getInstance().getVariables();
-        jobjectArray result = env->NewObjectArray(variables.size(), variableClass, nullptr);
+    auto variables = Environment::getInstance().getVariables();
+    jobjectArray result = env->NewObjectArray(variables.size(), variableClass, nullptr);
 
-        for (int i = 0; i < variables.size(); i++) {
-            jobject jVariable = env->NewObject(variableClass, variableMethodID);
+    for (int i = 0; i < variables.size(); i++) {
+        jobject jVariable = env->NewObject(variableClass, variableMethodID);
 
-            jfieldID jKeyField = env->GetFieldID(variableClass, "key", "Ljava/lang/String;");
-            jfieldID jValueField = env->GetFieldID(variableClass, "value", "Ljava/lang/String;");
-            jfieldID jDescriptionField = env->GetFieldID(
-                    variableClass,
-                    "description",
-                    "Ljava/lang/String;"
-            );
+        jfieldID jKeyField = env->GetFieldID(variableClass, "key", "Ljava/lang/String;");
+        jfieldID jValueField = env->GetFieldID(variableClass, "value", "Ljava/lang/String;");
+        jfieldID jDescriptionField = env->GetFieldID(
+            variableClass,
+            "description",
+            "Ljava/lang/String;"
+        );
 
-            env->SetObjectField(jVariable, jKeyField, env->NewStringUTF(variables[i].key.data()));
-            env->SetObjectField(jVariable, jValueField, env->NewStringUTF(variables[i].value.data()));
-            env->SetObjectField(
-                    jVariable,
-                    jDescriptionField,
-                    env->NewStringUTF(variables[i].description.data()));
+        env->SetObjectField(jVariable, jKeyField, env->NewStringUTF(variables[i].key.data()));
+        env->SetObjectField(jVariable, jValueField, env->NewStringUTF(variables[i].value.data()));
+        env->SetObjectField(
+            jVariable,
+            jDescriptionField,
+            env->NewStringUTF(variables[i].description.data()));
 
-            env->SetObjectArrayElement(result, i, jVariable);
-        }
-        return result;
-    } catch (std::exception &exception) {
-        LOGE("Error in serializeState: %s", exception.what());
-        JavaUtils::throwRetroException(env, ERROR_GENERIC);
+        env->SetObjectArrayElement(result, i, jVariable);
     }
-    return nullptr;
+    return result;
 }
 
 JNIEXPORT jobjectArray JNICALL Java_com_swordfish_libretrodroid_LibretroDroid_getControllers(
     JNIEnv* env,
     jclass obj
 ) {
-    try {
-        jclass variableClass = env->FindClass("[Lcom/swordfish/libretrodroid/Controller;");
+    jclass variableClass = env->FindClass("[Lcom/swordfish/libretrodroid/Controller;");
 
-        auto controllers = Environment::getInstance().getControllers();
-        jobjectArray result = env->NewObjectArray(controllers.size(), variableClass, nullptr);
+    auto controllers = Environment::getInstance().getControllers();
+    jobjectArray result = env->NewObjectArray(controllers.size(), variableClass, nullptr);
 
-        for (int i = 0; i < controllers.size(); i++) {
-            jclass variableClass2 = env->FindClass("com/swordfish/libretrodroid/Controller");
-            jobjectArray controllerArray = env->NewObjectArray(
-                    controllers[i].size(),
-                    variableClass2,
-                    nullptr
+    for (int i = 0; i < controllers.size(); i++) {
+        jclass variableClass2 = env->FindClass("com/swordfish/libretrodroid/Controller");
+        jobjectArray controllerArray = env->NewObjectArray(
+            controllers[i].size(),
+            variableClass2,
+            nullptr
+        );
+        jmethodID variableMethodID = env->GetMethodID(variableClass2, "<init>", "()V");
+
+        for (int j = 0; j < controllers[i].size(); j++) {
+            jobject jController = env->NewObject(variableClass2, variableMethodID);
+
+            jfieldID jIdField = env->GetFieldID(variableClass2, "id", "I");
+            jfieldID jDescriptionField = env->GetFieldID(
+                variableClass2,
+                "description",
+                "Ljava/lang/String;"
             );
-            jmethodID variableMethodID = env->GetMethodID(variableClass2, "<init>", "()V");
 
-            for (int j = 0; j < controllers[i].size(); j++) {
-                jobject jController = env->NewObject(variableClass2, variableMethodID);
+            env->SetIntField(jController, jIdField, (int) controllers[i][j].id);
+            env->SetObjectField(
+                jController,
+                jDescriptionField,
+                env->NewStringUTF(controllers[i][j].description.data()));
 
-                jfieldID jIdField = env->GetFieldID(variableClass2, "id", "I");
-                jfieldID jDescriptionField = env->GetFieldID(
-                        variableClass2,
-                        "description",
-                        "Ljava/lang/String;"
-                );
-
-                env->SetIntField(jController, jIdField, (int) controllers[i][j].id);
-                env->SetObjectField(
-                        jController,
-                        jDescriptionField,
-                        env->NewStringUTF(controllers[i][j].description.data()));
-
-                env->SetObjectArrayElement(controllerArray, j, jController);
-            }
-
-            env->SetObjectArrayElement(result, i, controllerArray);
+            env->SetObjectArrayElement(controllerArray, j, jController);
         }
-        return result;
-    } catch (std::exception &exception) {
-        LOGE("Error in serializeState: %s", exception.what());
-        JavaUtils::throwRetroException(env, ERROR_GENERIC);
+
+        env->SetObjectArrayElement(result, i, controllerArray);
     }
-    return nullptr;
+    return result;
 }
 
 JNIEXPORT void JNICALL Java_com_swordfish_libretrodroid_LibretroDroid_setControllerType(
@@ -485,14 +473,9 @@ JNIEXPORT void JNICALL Java_com_swordfish_libretrodroid_LibretroDroid_loadGameFr
     jclass obj,
     jstring gameFilePath
 ) {
-    try {
-        if (gameFilePath == nullptr) {
-            LOGE("Error: gameFilePath is null");
-            JavaUtils::throwRetroException(env, ERROR_LOAD_GAME);
-            return;
-        }
+    auto gamePath = JniString(env, gameFilePath);
 
-        auto gamePath = JniString(env, gameFilePath);
+    try {
         LibretroDroid::getInstance().loadGameFromPath(gamePath.stdString());
     } catch (std::exception &exception) {
         LOGE("Error in loadGameFromPath: %s", exception.what());
@@ -506,22 +489,15 @@ JNIEXPORT void JNICALL Java_com_swordfish_libretrodroid_LibretroDroid_loadGameFr
     jbyteArray gameFileBytes
 ) {
     try {
-        if (gameFileBytes == nullptr) {
-            JavaUtils::throwRetroException(env, ERROR_LOAD_GAME);
-            return;
-        }
-
         size_t size = env->GetArrayLength(gameFileBytes);
-
-        std::vector<int8_t> data(size);
-
+        auto* data = new int8_t[size];
         env->GetByteArrayRegion(
             gameFileBytes,
             0,
             size,
-            data.data()
+            reinterpret_cast<int8_t*>(data)
         );
-        LibretroDroid::getInstance().loadGameFromBytes(data.data(), size);
+        LibretroDroid::getInstance().loadGameFromBytes(data, size);
     } catch (std::exception &exception) {
         LOGE("Error in loadGameFromBytes: %s", exception.what());
         JavaUtils::throwRetroException(env, ERROR_LOAD_GAME);
@@ -535,55 +511,26 @@ JNIEXPORT void JNICALL Java_com_swordfish_libretrodroid_LibretroDroid_loadGameFr
 ) {
 
     try {
-        jclass detachedVirtualFileClass = env->FindClass("com/swordfish/libretrodroid/DetachedVirtualFile");
-        if (!detachedVirtualFileClass) {
-            JavaUtils::throwRetroException(env, ERROR_LOAD_GAME);
-            return;
-        }
         jmethodID getVirtualFileMethodID = env->GetMethodID(
-                detachedVirtualFileClass,
+                env->FindClass("com/swordfish/libretrodroid/DetachedVirtualFile"),
                 "getVirtualPath",
                 "()Ljava/lang/String;"
         );
-        if (!getVirtualFileMethodID) {
-            LOGE("Failed to find DetachedVirtualFile class!");
-            env->DeleteLocalRef(detachedVirtualFileClass);
-            JavaUtils::throwRetroException(env, ERROR_LOAD_GAME);
-            return;
-        }
         jmethodID getFileDescriptorMethodID = env->GetMethodID(
                 env->FindClass("com/swordfish/libretrodroid/DetachedVirtualFile"),
                 "getFileDescriptor",
                 "()I"
         );
 
-        if (!getFileDescriptorMethodID) {
-            LOGE("Failed to find getFileDescriptorMethodID class!");
-            env->DeleteLocalRef(detachedVirtualFileClass);
-            JavaUtils::throwRetroException(env, ERROR_LOAD_GAME);
-            return;
-        }
-
         std::vector<VFSFile> virtualFiles;
 
         JavaUtils::forEachOnJavaIterable(env, virtualFileList, [&](jobject item) {
-            if (!item) {
-                return; // Skip this item
-            }
-
-            jstring jVirtualPath = (jstring) env->CallObjectMethod(item, getVirtualFileMethodID);
-
-            if (!jVirtualPath) {
-                LOGE("Virtual file path is null");
-                return;
-            }
-            JniString virtualFileName(env, jVirtualPath);
+            JniString virtualFileName(env,(jstring) env->CallObjectMethod(
+                item,
+                getVirtualFileMethodID
+            ));
 
             int fileDescriptor = env->CallIntMethod(item, getFileDescriptorMethodID);
-            if (fileDescriptor < 0) {
-                LOGE("Invalid file descriptor for: %s", virtualFileName.stdString().c_str());
-                return;
-            }
             virtualFiles.emplace_back(VFSFile(virtualFileName.stdString(), fileDescriptor));
         });
 
@@ -635,26 +582,21 @@ JNIEXPORT void JNICALL Java_com_swordfish_libretrodroid_LibretroDroid_step(
     jclass obj,
     jobject glRetroView
 ) {
-    try {
-        LibretroDroid::getInstance().step();
+    LibretroDroid::getInstance().step();
 
-        if (LibretroDroid::getInstance().requiresVideoRefresh()) {
-            LibretroDroid::getInstance().clearRequiresVideoRefresh();
+    if (LibretroDroid::getInstance().requiresVideoRefresh()) {
+        LibretroDroid::getInstance().clearRequiresVideoRefresh();
+        jclass cls = env->GetObjectClass(glRetroView);
+        jmethodID requestAspectRatioUpdate = env->GetMethodID(cls, "refreshAspectRatio", "()V");
+        env->CallVoidMethod(glRetroView, requestAspectRatioUpdate);
+    }
+
+    if (LibretroDroid::getInstance().isRumbleEnabled()) {
+        LibretroDroid::getInstance().handleRumbleUpdates([&](int port, float weak, float strong) {
             jclass cls = env->GetObjectClass(glRetroView);
-            jmethodID requestAspectRatioUpdate = env->GetMethodID(cls, "refreshAspectRatio", "()V");
-            env->CallVoidMethod(glRetroView, requestAspectRatioUpdate);
-        }
-
-        if (LibretroDroid::getInstance().isRumbleEnabled()) {
-            LibretroDroid::getInstance().handleRumbleUpdates([&](int port, float weak, float strong) {
-                jclass cls = env->GetObjectClass(glRetroView);
-                jmethodID sendRumbleStrengthMethodID = env->GetMethodID(cls, "sendRumbleEvent", "(IFF)V");
-                env->CallVoidMethod(glRetroView, sendRumbleStrengthMethodID, port, weak, strong);
-            });
-        }
-    } catch (std::exception &exception) {
-        LOGE("Error in resume: %s", exception.what());
-        JavaUtils::throwRetroException(env, ERROR_GENERIC);
+            jmethodID sendRumbleStrengthMethodID = env->GetMethodID(cls, "sendRumbleEvent", "(IFF)V");
+            env->CallVoidMethod(glRetroView, sendRumbleStrengthMethodID, port, weak, strong);
+        });
     }
 }
 
